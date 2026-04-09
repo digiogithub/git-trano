@@ -1,0 +1,31 @@
+[package]
+name = "git-trano"
+version = "0.1.0"
+edition = "2021"
+authors = ["Git Trano Contributors"]
+description = "Git plugin for Capistrano-style releases from branch/tag with rollback support"
+license = "MIT"
+readme = "README.md"
+repository = ""
+homepage = ""
+documentation = ""
+keywords = ["git", "deployment", "capistrano", "cli", "devops"]
+categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "git-trano"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+clap = { version = "4.5", features = ["derive"] }
+fs_extra = "1.3"
+walkdir = "2.5"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+opt-level = 3
