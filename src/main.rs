@@ -12,35 +12,35 @@ use clap::{ArgAction, Parser};
 #[command(
     name = "git-trano",
     version,
-    about = "Git plugin para despliegues estilo Capistrano",
-    long_about = "Plugin de Git para desplegar rama/tag del repo actual a una estructura tipo Capistrano:\n\
+    about = "Git plugin for Capistrano-style deployments",
+    long_about = "Git plugin to deploy branch/tag from the current repository into a Capistrano-like layout:\n\
                   - releases/<timestamp>\n\
                   - current (symlink)\n\
                   - shared\n\
-                  Soporta rollback con --revert y rutas compartidas con --shared."
+                  Supports rollback with --revert and shared paths with --shared."
 )]
 struct Cli {
-    /// Rama a desplegar (mutuamente excluyente con --tag y --revert)
+    /// Branch to deploy (mutually exclusive with --tag and --revert)
     #[arg(short = 'b', long = "branch", conflicts_with_all = ["tag", "revert"])]
     branch: Option<String>,
 
-    /// Tag a desplegar (mutuamente excluyente con --branch y --revert)
+    /// Tag to deploy (mutually exclusive with --branch and --revert)
     #[arg(short = 't', long = "tag", conflicts_with_all = ["branch", "revert"])]
     tag: Option<String>,
 
-    /// Revertir current a la release anterior (mutuamente excluyente con --branch/--tag)
+    /// Revert current to the previous release (mutually exclusive with --branch/--tag)
     #[arg(short = 'r', long = "revert", action = ArgAction::SetTrue, conflicts_with_all = ["branch", "tag"])]
     revert: bool,
 
-    /// Ruta base de despliegue (ej: /www/folder)
+    /// Deploy base path (e.g. /www/folder)
     #[arg(short = 'p', long = "path")]
     deploy_path: PathBuf,
 
-    /// Número de releases a mantener (default: 3)
+    /// Number of releases to keep (default: 3)
     #[arg(short = 'k', long = "keep", default_value_t = 3)]
     keep: usize,
 
-    /// Rutas compartidas (repetible), ej:
+    /// Shared paths (repeatable), e.g.:
     /// --shared node_modules --shared vendor/subfolder
     #[arg(long = "shared")]
     shared: Vec<String>,
@@ -48,68 +48,15 @@ struct Cli {
 
 #[derive(Debug)]
 struct DeployLayout {
-    base: PathBuf,
     releases: PathBuf,
     shared: PathBuf,
     current: PathBuf,
 }
 
-fn main() -> Result<()> {
-    let cli = Cli::parse();
-
-    if !cli.revert && cli.branch.is_none() && cli.tag.is_none() {
-        bail!("Debes indicar una acción: --branch, --tag o --revert");
-    }
-
-    ensure_git_repo()?;
-
-    let layout = prepare_layout(&cli.deploy_path)?;
-
-    if cli.revert {
-        do_revert(&layout)?;
-        println!("Revert completado. 'current' apunta a la release anterior.");
-        return Ok(());
-    }
-
-    let reference = match (&cli.branch, &cli.tag) {
-        (Some(branch), None) => RefTarget::Branch(branch.clone()),
-        (None, Some(tag)) => RefTarget::Tag(tag.clone()),
-        _ => bail!("Debes usar exactamente una de estas opciones: --branch o --tag"),
-    };
-
-    // 1) Sincronizar remoto
-    run_git(
-        ["fetch", "--all", "--prune"],
-        "No se pudo ejecutar git fetch",
-    )?;
-
-    // 2) Actualizar checkout local al target solicitado
-    checkout_target(&reference)?;
-
-    // 3) Crear release timestamp
-    let release_name = make_release_timestamp();
-    let release_path = layout.releases.join(&release_name);
-    fs::create_dir_all(&release_path)
-        .with_context(|| format!("No se pudo crear release {:?}", release_path))?;
-
-    // 4) Copiar working tree actual a release (excluyendo .git y artefactos comunes)
-    copy_repo_to_release(Path::new("."), &release_path)?;
-
-    // 5) Actualizar symlink current -> nueva release
-    switch_current_symlink(&layout.current, &release_path)?;
-
-    // 6) Aplicar shared links sobre current
-    apply_shared_links(&layout, &cli.shared)?;
-
-    // 7) Limpiar releases viejas
-    cleanup_old_releases(&layout.releases, cli.keep)?;
-
-    println!("Deploy completado:");
-    println!("  target   : {}", reference.describe());
-    println!("  release  : {}", release_name);
-    println!("  current  : {}", layout.current.display());
-
-    Ok(())
+#[derive(Debug)]
+struct DeployContext {
+    repo_root: PathBuf,
+    deploy_base: PathBuf,
 }
 
 #[derive(Debug)]
@@ -121,27 +68,136 @@ enum RefTarget {
 impl RefTarget {
     fn describe(&self) -> String {
         match self {
-            RefTarget::Branch(b) => format!("branch:{}", b),
-            RefTarget::Tag(t) => format!("tag:{}", t),
+            RefTarget::Branch(b) => format!("branch:{b}"),
+            RefTarget::Tag(t) => format!("tag:{t}"),
         }
     }
+}
+
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+    validate_cli(&cli)?;
+
+    ensure_git_repo()?;
+
+    let ctx = build_context(&cli.deploy_path)?;
+    let layout = prepare_layout(&ctx.deploy_base)?;
+
+    if cli.revert {
+        do_revert(&layout)?;
+        println!("Revert completed. 'current' now points to the previous release.");
+        return Ok(());
+    }
+
+    let reference = match (&cli.branch, &cli.tag) {
+        (Some(branch), None) => RefTarget::Branch(branch.clone()),
+        (None, Some(tag)) => RefTarget::Tag(tag.clone()),
+        _ => bail!("You must provide exactly one of: --branch or --tag"),
+    };
+
+    deploy(&ctx, &layout, &reference, cli.keep, &cli.shared)
+}
+
+fn validate_cli(cli: &Cli) -> Result<()> {
+    if !cli.revert && cli.branch.is_none() && cli.tag.is_none() {
+        bail!("You must provide one action: --branch, --tag, or --revert");
+    }
+    if cli.keep == 0 {
+        bail!("--keep must be >= 1");
+    }
+    Ok(())
+}
+
+fn build_context(deploy_path: &Path) -> Result<DeployContext> {
+    let repo_root = git_toplevel()?;
+    let deploy_base = absolute_from_cwd(deploy_path)?;
+
+    Ok(DeployContext {
+        repo_root,
+        deploy_base,
+    })
+}
+
+fn deploy(
+    ctx: &DeployContext,
+    layout: &DeployLayout,
+    reference: &RefTarget,
+    keep: usize,
+    shared_items: &[String],
+) -> Result<()> {
+    // 1) Sync remote references
+    run_git(["fetch", "--all", "--prune"], "Failed to run git fetch")?;
+
+    // 2) Move local checkout to requested target
+    checkout_target(reference)?;
+
+    // 3) Create timestamped release directory
+    let release_name = make_release_timestamp();
+    let release_path = layout.releases.join(&release_name);
+    fs::create_dir_all(&release_path).with_context(|| {
+        format!(
+            "Failed to create release directory {}",
+            release_path.display()
+        )
+    })?;
+
+    // 4) Copy repository content into the new release.
+    // IMPORTANT: use repo root as source, and exclude deploy base if it is inside repo.
+    copy_repo_to_release(&ctx.repo_root, &release_path, &ctx.deploy_base)?;
+
+    // 5) Switch current symlink to new release
+    switch_current_symlink(&layout.current, &release_path)?;
+
+    // 6) Apply shared links inside current release
+    apply_shared_links(layout, shared_items)?;
+
+    // 7) Remove old releases
+    cleanup_old_releases(&layout.releases, keep)?;
+
+    println!("Deploy completed:");
+    println!("  target   : {}", reference.describe());
+    println!("  release  : {}", release_name);
+    println!("  current  : {}", layout.current.display());
+
+    Ok(())
 }
 
 fn ensure_git_repo() -> Result<()> {
     let output = Command::new("git")
         .args(["rev-parse", "--is-inside-work-tree"])
         .output()
-        .context("No se pudo ejecutar git rev-parse")?;
+        .context("Failed to execute git rev-parse")?;
 
     if !output.status.success() {
-        bail!("Este comando debe ejecutarse dentro de un repositorio git");
+        bail!("This command must be executed inside a git repository");
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if stdout != "true" {
-        bail!("No estás dentro de un working tree git");
+        bail!("Not inside a git working tree");
     }
+
     Ok(())
+}
+
+fn git_toplevel() -> Result<PathBuf> {
+    let top = git_stdout(&["rev-parse", "--show-toplevel"])?;
+    let path = PathBuf::from(top);
+
+    if !path.is_dir() {
+        bail!("Git top-level path is not a directory: {}", path.display());
+    }
+
+    fs::canonicalize(&path).with_context(|| format!("Failed to canonicalize {}", path.display()))
+}
+
+fn absolute_from_cwd(path: &Path) -> Result<PathBuf> {
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+
+    let cwd = std::env::current_dir().context("Failed to get current directory")?;
+    Ok(cwd.join(path))
 }
 
 fn prepare_layout(base: &Path) -> Result<DeployLayout> {
@@ -151,12 +207,11 @@ fn prepare_layout(base: &Path) -> Result<DeployLayout> {
     let current = base.join("current");
 
     fs::create_dir_all(&releases)
-        .with_context(|| format!("No se pudo crear directorio {:?}", releases))?;
+        .with_context(|| format!("Failed to create directory {}", releases.display()))?;
     fs::create_dir_all(&shared)
-        .with_context(|| format!("No se pudo crear directorio {:?}", shared))?;
+        .with_context(|| format!("Failed to create directory {}", shared.display()))?;
 
     Ok(DeployLayout {
-        base,
         releases,
         shared,
         current,
@@ -164,7 +219,6 @@ fn prepare_layout(base: &Path) -> Result<DeployLayout> {
 }
 
 fn canonical_or_original(path: &Path) -> PathBuf {
-    // Si no existe todavía, devolvemos el path original.
     fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
@@ -172,11 +226,12 @@ fn run_git<const N: usize>(args: [&str; N], err_ctx: &str) -> Result<()> {
     let status = Command::new("git")
         .args(args)
         .status()
-        .with_context(|| format!("{}: fallo al invocar git", err_ctx))?;
+        .with_context(|| format!("{err_ctx}: failed to invoke git"))?;
 
     if !status.success() {
-        bail!("{}", err_ctx);
+        bail!("{err_ctx}");
     }
+
     Ok(())
 }
 
@@ -184,73 +239,72 @@ fn git_stdout(args: &[&str]) -> Result<String> {
     let out = Command::new("git")
         .args(args)
         .output()
-        .with_context(|| format!("No se pudo ejecutar git {:?}", args))?;
+        .with_context(|| format!("Failed to execute git {:?}", args))?;
+
     if !out.status.success() {
-        bail!("git {:?} devolvió error", args);
+        bail!("git {:?} returned a non-zero status", args);
     }
+
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 fn checkout_target(target: &RefTarget) -> Result<()> {
     match target {
         RefTarget::Branch(branch) => {
-            // Confirmar que existe en remoto
-            let remote_ref = format!("refs/remotes/origin/{}", branch);
+            let remote_ref = format!("refs/remotes/origin/{branch}");
             let exists_remote = Command::new("git")
                 .args(["show-ref", "--verify", "--quiet", &remote_ref])
                 .status()
-                .context("No se pudo verificar rama remota")?;
+                .context("Failed to verify remote branch")?;
 
             if !exists_remote.success() {
-                bail!("La rama remota origin/{} no existe", branch);
+                bail!("Remote branch origin/{branch} does not exist");
             }
 
-            // Si la rama local existe: reset a origin/branch
-            let local_ref = format!("refs/heads/{}", branch);
+            let local_ref = format!("refs/heads/{branch}");
             let exists_local = Command::new("git")
                 .args(["show-ref", "--verify", "--quiet", &local_ref])
                 .status()
-                .context("No se pudo verificar rama local")?;
+                .context("Failed to verify local branch")?;
 
             if exists_local.success() {
                 run_git(
                     ["checkout", branch.as_str()],
-                    "No se pudo hacer checkout de la rama local",
+                    "Failed to checkout local branch",
                 )?;
-                let reset_to = format!("origin/{}", branch);
+                let reset_to = format!("origin/{branch}");
                 run_git(
                     ["reset", "--hard", reset_to.as_str()],
-                    "No se pudo sincronizar la rama local con remoto",
+                    "Failed to sync local branch with remote",
                 )?;
             } else {
+                let tracking = format!("origin/{branch}");
                 run_git(
                     [
                         "checkout",
                         "-B",
                         branch.as_str(),
                         "--track",
-                        &format!("origin/{}", branch),
+                        tracking.as_str(),
                     ],
-                    "No se pudo crear/trakear la rama local desde origin",
+                    "Failed to create/track local branch from origin",
                 )?;
             }
         }
         RefTarget::Tag(tag) => {
-            // Verificar que tag existe
-            let tag_ref = format!("refs/tags/{}", tag);
+            let tag_ref = format!("refs/tags/{tag}");
             let exists_tag = Command::new("git")
                 .args(["show-ref", "--verify", "--quiet", &tag_ref])
                 .status()
-                .context("No se pudo verificar tag")?;
+                .context("Failed to verify tag")?;
 
             if !exists_tag.success() {
-                bail!("La tag '{}' no existe en este repositorio", tag);
+                bail!("Tag '{tag}' does not exist in this repository");
             }
 
-            // Checkout detached al tag
             run_git(
                 ["checkout", "--detach", tag.as_str()],
-                "No se pudo hacer checkout de la tag",
+                "Failed to checkout tag",
             )?;
         }
     }
@@ -259,34 +313,42 @@ fn checkout_target(target: &RefTarget) -> Result<()> {
 }
 
 fn make_release_timestamp() -> String {
-    // Formato seguro para nombre de carpeta
-    // Ejemplo: 2026-01-10T20-31-05Z
     Utc::now().format("%Y-%m-%dT%H-%M-%SZ").to_string()
 }
 
-fn copy_repo_to_release(src_repo_root: &Path, dst_release: &Path) -> Result<()> {
-    // Copia recursiva simple filtrando entradas.
-    // Excluye .git y directorios de build comunes.
-    copy_dir_filtered(src_repo_root, dst_release, &|rel| {
+fn copy_repo_to_release(
+    src_repo_root: &Path,
+    dst_release: &Path,
+    deploy_base: &Path,
+) -> Result<()> {
+    let src_repo_root = canonical_or_original(src_repo_root);
+    let deploy_base_abs = canonical_or_original(deploy_base);
+
+    // If deploy path is inside repo, this prefix allows us to exclude it entirely.
+    let deploy_rel_from_repo = deploy_base_abs
+        .strip_prefix(&src_repo_root)
+        .ok()
+        .map(PathBuf::from);
+
+    copy_dir_filtered(&src_repo_root, dst_release, &|rel| {
         let rel_str = rel.to_string_lossy();
 
+        // Exclude git internals
         if rel_str == ".git" || rel_str.starts_with(".git/") {
             return false;
         }
 
-        // Evitar copiar el propio directorio de despliegue si está dentro del repo
-        if rel_str.starts_with("releases/")
-            || rel_str == "releases"
-            || rel_str.starts_with("shared/")
-            || rel_str == "shared"
-            || rel_str == "current"
-        {
+        // Exclude common build artifacts
+        if rel_str == "target" || rel_str.starts_with("target/") {
             return false;
         }
 
-        // Excluir algunos artefactos típicos
-        if rel_str.starts_with("target/") || rel_str == "target" {
-            return false;
+        // Exclude deploy root itself if it is within repository root.
+        // This fixes recursive copy path growth when --path points inside or near repo content.
+        if let Some(prefix) = &deploy_rel_from_repo {
+            if rel == prefix || rel.starts_with(prefix) {
+                return false;
+            }
         }
 
         true
@@ -298,7 +360,7 @@ where
     F: Fn(&Path) -> bool,
 {
     if !src_root.is_dir() {
-        bail!("Ruta origen no es un directorio: {}", src_root.display());
+        bail!("Source path is not a directory: {}", src_root.display());
     }
 
     for entry in walkdir::WalkDir::new(src_root)
@@ -317,9 +379,6 @@ where
         }
 
         if !include_rel(rel) {
-            if entry.file_type().is_dir() {
-                // walkdir no tiene prune nativo aquí; el filtro include se aplica por cada item.
-            }
             continue;
         }
 
@@ -327,20 +386,20 @@ where
 
         if entry.file_type().is_dir() {
             fs::create_dir_all(&dst_path)
-                .with_context(|| format!("No se pudo crear directorio {}", dst_path.display()))?;
+                .with_context(|| format!("Failed to create directory {}", dst_path.display()))?;
         } else if entry.file_type().is_symlink() {
-            // Copiamos symlink como symlink
             let target = fs::read_link(src_path)
-                .with_context(|| format!("No se pudo leer symlink {}", src_path.display()))?;
+                .with_context(|| format!("Failed to read symlink {}", src_path.display()))?;
             create_symlink(&target, &dst_path)?;
         } else if entry.file_type().is_file() {
             if let Some(parent) = dst_path.parent() {
                 fs::create_dir_all(parent)
-                    .with_context(|| format!("No se pudo crear directorio {}", parent.display()))?;
+                    .with_context(|| format!("Failed to create directory {}", parent.display()))?;
             }
+
             fs::copy(src_path, &dst_path).with_context(|| {
                 format!(
-                    "No se pudo copiar archivo {} -> {}",
+                    "Failed to copy file {} -> {}",
                     src_path.display(),
                     dst_path.display()
                 )
@@ -355,7 +414,7 @@ fn switch_current_symlink(current_link: &Path, new_release: &Path) -> Result<()>
     if current_link.exists() || is_symlink(current_link) {
         remove_path_any(current_link).with_context(|| {
             format!(
-                "No se pudo eliminar current existente: {}",
+                "Failed to remove existing current path: {}",
                 current_link.display()
             )
         })?;
@@ -363,7 +422,7 @@ fn switch_current_symlink(current_link: &Path, new_release: &Path) -> Result<()>
 
     create_symlink(new_release, current_link).with_context(|| {
         format!(
-            "No se pudo crear symlink current {} -> {}",
+            "Failed to create symlink current {} -> {}",
             current_link.display(),
             new_release.display()
         )
@@ -383,24 +442,23 @@ fn apply_shared_links(layout: &DeployLayout, shared_items: &[String]) -> Result<
     for item in shared_items {
         let clean = normalize_relative_path(item)?;
         if !seen.insert(clean.clone()) {
-            continue; // evitar duplicados
+            continue;
         }
 
         let shared_target = layout.shared.join(&clean);
         if let Some(parent) = shared_target.parent() {
             fs::create_dir_all(parent).with_context(|| {
                 format!(
-                    "No se pudo crear directorio padre de shared {}",
+                    "Failed to create parent directory for shared path {}",
                     parent.display()
                 )
             })?;
         }
 
-        // Asegurar que existe el destino en shared como directorio
         if !shared_target.exists() {
             fs::create_dir_all(&shared_target).with_context(|| {
                 format!(
-                    "No se pudo crear directorio shared {}",
+                    "Failed to create shared directory {}",
                     shared_target.display()
                 )
             })?;
@@ -408,18 +466,17 @@ fn apply_shared_links(layout: &DeployLayout, shared_items: &[String]) -> Result<
 
         let current_item = current_resolved.join(&clean);
 
-        // Si existe en current, borrarlo (archivo, dir o symlink)
         if current_item.exists() || is_symlink(&current_item) {
             remove_path_any(&current_item).with_context(|| {
                 format!(
-                    "No se pudo eliminar ruta existente en current {}",
+                    "Failed to remove existing path in current {}",
                     current_item.display()
                 )
             })?;
         } else if let Some(parent) = current_item.parent() {
             fs::create_dir_all(parent).with_context(|| {
                 format!(
-                    "No se pudo crear padre en current para {}",
+                    "Failed to create parent path in current for {}",
                     current_item.display()
                 )
             })?;
@@ -427,7 +484,7 @@ fn apply_shared_links(layout: &DeployLayout, shared_items: &[String]) -> Result<
 
         create_symlink(&shared_target, &current_item).with_context(|| {
             format!(
-                "No se pudo crear symlink shared {} -> {}",
+                "Failed to create shared symlink {} -> {}",
                 current_item.display(),
                 shared_target.display()
             )
@@ -438,10 +495,6 @@ fn apply_shared_links(layout: &DeployLayout, shared_items: &[String]) -> Result<
 }
 
 fn cleanup_old_releases(releases_dir: &Path, keep: usize) -> Result<()> {
-    if keep == 0 {
-        bail!("--keep debe ser >= 1");
-    }
-
     let mut dirs = list_release_dirs_sorted(releases_dir)?;
     if dirs.len() <= keep {
         return Ok(());
@@ -450,7 +503,7 @@ fn cleanup_old_releases(releases_dir: &Path, keep: usize) -> Result<()> {
     let to_remove = dirs.len() - keep;
     for old in dirs.drain(0..to_remove) {
         fs::remove_dir_all(&old)
-            .with_context(|| format!("No se pudo eliminar release vieja {}", old.display()))?;
+            .with_context(|| format!("Failed to remove old release {}", old.display()))?;
     }
 
     Ok(())
@@ -459,16 +512,14 @@ fn cleanup_old_releases(releases_dir: &Path, keep: usize) -> Result<()> {
 fn do_revert(layout: &DeployLayout) -> Result<()> {
     let releases = list_release_dirs_sorted(&layout.releases)?;
     if releases.len() < 2 {
-        bail!("No hay suficientes releases para revertir (se requieren al menos 2)");
+        bail!("Not enough releases to revert (at least 2 required)");
     }
 
-    // La penúltima release pasa a ser current
     let previous = releases
         .get(releases.len() - 2)
-        .ok_or_else(|| anyhow!("No se pudo determinar la release anterior"))?;
+        .ok_or_else(|| anyhow!("Failed to determine previous release"))?;
 
-    switch_current_symlink(&layout.current, previous)?;
-    Ok(())
+    switch_current_symlink(&layout.current, previous)
 }
 
 fn list_release_dirs_sorted(releases_dir: &Path) -> Result<Vec<PathBuf>> {
@@ -479,7 +530,7 @@ fn list_release_dirs_sorted(releases_dir: &Path) -> Result<Vec<PathBuf>> {
     }
 
     for ent in fs::read_dir(releases_dir)
-        .with_context(|| format!("No se pudo listar {}", releases_dir.display()))?
+        .with_context(|| format!("Failed to list {}", releases_dir.display()))?
     {
         let ent = ent?;
         let path = ent.path();
@@ -488,7 +539,7 @@ fn list_release_dirs_sorted(releases_dir: &Path) -> Result<Vec<PathBuf>> {
         }
     }
 
-    // Orden lexicográfico ascendente; funciona con formato timestamp YYYY-MM-DDTHH-MM-SSZ
+    // Lexicographical sort works with YYYY-MM-DDTHH-MM-SSZ
     entries.sort_by(|a, b| {
         let an = a.file_name().and_then(OsStr::to_str).unwrap_or_default();
         let bn = b.file_name().and_then(OsStr::to_str).unwrap_or_default();
@@ -501,13 +552,13 @@ fn list_release_dirs_sorted(releases_dir: &Path) -> Result<Vec<PathBuf>> {
 fn resolve_current_target(current_link: &Path) -> Result<PathBuf> {
     if !is_symlink(current_link) {
         bail!(
-            "'current' no es un symlink válido: {}",
+            "'current' is not a valid symlink: {}",
             current_link.display()
         );
     }
 
     let target = fs::read_link(current_link)
-        .with_context(|| format!("No se pudo leer symlink {}", current_link.display()))?;
+        .with_context(|| format!("Failed to read symlink {}", current_link.display()))?;
 
     let resolved = if target.is_absolute() {
         target
@@ -525,7 +576,7 @@ fn normalize_relative_path(input: &str) -> Result<PathBuf> {
     let p = Path::new(input);
 
     if p.is_absolute() {
-        bail!("La ruta --shared debe ser relativa: {}", input);
+        bail!("--shared path must be relative: {}", input);
     }
 
     let mut out = PathBuf::new();
@@ -534,15 +585,15 @@ fn normalize_relative_path(input: &str) -> Result<PathBuf> {
         match c {
             Component::CurDir => {}
             Component::Normal(seg) => out.push(seg),
-            Component::ParentDir => bail!("No se permite '..' en --shared: {}", input),
+            Component::ParentDir => bail!("'..' is not allowed in --shared: {}", input),
             Component::RootDir | Component::Prefix(_) => {
-                bail!("Ruta --shared inválida: {}", input)
+                bail!("Invalid --shared path: {}", input)
             }
         }
     }
 
     if out.as_os_str().is_empty() {
-        bail!("Ruta --shared vacía/inválida: {}", input);
+        bail!("Empty/invalid --shared path: {}", input);
     }
 
     Ok(out)
@@ -556,18 +607,18 @@ fn is_symlink(path: &Path) -> bool {
 
 fn remove_path_any(path: &Path) -> Result<()> {
     let meta = fs::symlink_metadata(path)
-        .with_context(|| format!("No se pudo obtener metadata de {}", path.display()))?;
+        .with_context(|| format!("Failed to get metadata for {}", path.display()))?;
 
     let fty = meta.file_type();
 
     if fty.is_symlink() || fty.is_file() {
         fs::remove_file(path)
-            .with_context(|| format!("No se pudo eliminar archivo/symlink {}", path.display()))?;
+            .with_context(|| format!("Failed to remove file/symlink {}", path.display()))?;
     } else if fty.is_dir() {
         fs::remove_dir_all(path)
-            .with_context(|| format!("No se pudo eliminar directorio {}", path.display()))?;
+            .with_context(|| format!("Failed to remove directory {}", path.display()))?;
     } else {
-        bail!("Tipo de archivo no soportado: {}", path.display());
+        bail!("Unsupported file type: {}", path.display());
     }
 
     Ok(())
@@ -576,17 +627,20 @@ fn remove_path_any(path: &Path) -> Result<()> {
 #[cfg(unix)]
 fn create_symlink(src: &Path, dst: &Path) -> Result<()> {
     use std::os::unix::fs::symlink;
+
     if let Some(parent) = dst.parent() {
         fs::create_dir_all(parent)
-            .with_context(|| format!("No se pudo crear directorio padre {}", parent.display()))?;
+            .with_context(|| format!("Failed to create parent directory {}", parent.display()))?;
     }
+
     symlink(src, dst).with_context(|| {
         format!(
-            "No se pudo crear symlink {} -> {}",
+            "Failed to create symlink {} -> {}",
             dst.display(),
             src.display()
         )
     })?;
+
     Ok(())
 }
 
@@ -596,13 +650,13 @@ fn create_symlink(src: &Path, dst: &Path) -> Result<()> {
 
     if let Some(parent) = dst.parent() {
         fs::create_dir_all(parent)
-            .with_context(|| format!("No se pudo crear directorio padre {}", parent.display()))?;
+            .with_context(|| format!("Failed to create parent directory {}", parent.display()))?;
     }
 
     if src.is_dir() {
         symlink_dir(src, dst).with_context(|| {
             format!(
-                "No se pudo crear symlink de directorio {} -> {}",
+                "Failed to create directory symlink {} -> {}",
                 dst.display(),
                 src.display()
             )
@@ -610,7 +664,7 @@ fn create_symlink(src: &Path, dst: &Path) -> Result<()> {
     } else {
         symlink_file(src, dst).with_context(|| {
             format!(
-                "No se pudo crear symlink de archivo {} -> {}",
+                "Failed to create file symlink {} -> {}",
                 dst.display(),
                 src.display()
             )

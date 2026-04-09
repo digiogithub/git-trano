@@ -1,38 +1,38 @@
 # git-trano
 
-Plugin de Git escrito en Rust para despliegues estilo **Capistrano** desde el repositorio actual.
+Git plugin written in Rust for **Capistrano-style** deployments from the current repository.
 
-Permite:
+It allows you to:
 
-- Sincronizar remoto (`git fetch`)
-- Desplegar una **rama** o una **tag**
-- Crear releases en `releases/<fecha-hora>`
-- Actualizar el symlink `current`
-- Mantener sólo las últimas _N_ releases
-- Hacer `revert` a la release anterior
-- Gestionar symlinks de rutas compartidas (`--shared`)
+- Sync remote references (`git fetch`)
+- Deploy a **branch** or a **tag**
+- Create releases under `releases/<timestamp>`
+- Update the `current` symlink
+- Keep only the latest _N_ releases
+- Revert `current` to the previous release
+- Manage shared path symlinks (`--shared`)
 
 ---
 
-## Características
+## Features
 
-- Comando estilo plugin: `git trano ...`
-- Estructura de despliegue:
+- Plugin-style command: `git trano ...`
+- Deployment layout:
   - `<path>/releases`
   - `<path>/current` (symlink)
   - `<path>/shared`
-- Despliegue atómico por cambio de symlink
-- Limpieza automática de versiones antiguas (`--keep`, por defecto `3`)
-- Soporte para múltiples `--shared`
-- Makefile con tareas de build, static build e instalación
-- Pipeline de GitHub Actions para generar binarios estáticos (musl) y publicarlos en releases
-- Compatible con Linux/macOS (symlinks POSIX)
+- Atomic deployment by switching symlink
+- Automatic cleanup of old releases (`--keep`, default `3`)
+- Multiple `--shared` entries supported
+- Makefile with build, static build, and install tasks
+- GitHub Actions pipeline to build static binaries (musl) and publish them to releases
+- Linux/macOS compatible (POSIX symlinks)
 
 ---
 
-## Estructura generada en destino
+## Generated destination structure
 
-Dado `--path /www/folder`, se genera:
+Given `--path /www/folder`, this is created:
 
 ```/dev/null/tree.txt#L1-8
 /www/folder/
@@ -47,43 +47,43 @@ Dado `--path /www/folder`, se genera:
 
 ---
 
-## Requisitos
+## Requirements
 
-- Git instalado y disponible en `PATH`
-- Rust estable (si compilas desde código)
-- Ejecutar dentro de un repositorio Git válido
+- Git installed and available in `PATH`
+- Stable Rust toolchain (if building from source)
+- Must be run inside a valid Git repository
 
 ---
 
-## Instalación
+## Installation
 
-### Opción 1: Compilar desde código (cargo)
+### Option 1: Build from source (cargo)
 
 ```/dev/null/install-build.sh#L1-4
 cargo build --release
 install -m 0755 target/release/git-trano /usr/local/bin/git-trano
-# opcional alias plugin:
+# optional plugin alias:
 ln -sf /usr/local/bin/git-trano /usr/local/bin/git-trano
 ```
 
-Luego podrás usar:
+Then you can run:
 
 ```/dev/null/usage.txt#L1-1
 git trano ...
 ```
 
-> Git invoca subcomandos mediante binarios con prefijo `git-<subcomando>`.  
-> Para `git trano`, el ejecutable debe llamarse `git-trano`.
+> Git invokes subcommands through executables named `git-<subcommand>`.  
+> For `git trano`, the executable must be named `git-trano`.
 
-### Opción 2: `cargo install` local
+### Option 2: Local `cargo install`
 
 ```/dev/null/cargo-install.sh#L1-1
 cargo install --path .
 ```
 
-Asegúrate de que `~/.cargo/bin` esté en tu `PATH`.
+Make sure `~/.cargo/bin` is in your `PATH`.
 
-### Opción 3: Usar Makefile
+### Option 3: Use Makefile
 
 ```/dev/null/make-quickstart.sh#L1-6
 make help
@@ -96,62 +96,62 @@ make install
 
 ---
 
-## Uso
+## Usage
 
 ```/dev/null/help.txt#L1-14
-git trano --branch <nombre_rama> --path <ruta_destino> [--keep <n>] [--shared <ruta>]...
-git trano --tag <tag> --path <ruta_destino> [--keep <n>] [--shared <ruta>]...
-git trano --revert --path <ruta_destino>
+git trano --branch <branch_name> --path <destination_path> [--keep <n>] [--shared <path>]...
+git trano --tag <tag> --path <destination_path> [--keep <n>] [--shared <path>]...
+git trano --revert --path <destination_path>
 
-Opciones:
-  -b, --branch <rama>     Despliega la rama indicada
-  -t, --tag <tag>         Despliega la tag indicada
-  -p, --path <ruta>       Ruta base de despliegue
-  -k, --keep <n>          Releases a mantener (default: 3)
-      --shared <ruta>     Ruta compartida (repetible)
-  -r, --revert            Apunta current a la release anterior
-  -h, --help              Ayuda
-  -V, --version           Versión
+Options:
+  -b, --branch <branch>   Deploy the specified branch
+  -t, --tag <tag>         Deploy the specified tag
+  -p, --path <path>       Deployment base path
+  -k, --keep <n>          Releases to keep (default: 3)
+      --shared <path>     Shared path (repeatable)
+  -r, --revert            Point current to the previous release
+  -h, --help              Help
+  -V, --version           Version
 ```
 
 ---
 
-## Ejemplos
+## Examples
 
-### Desplegar rama
+### Deploy a branch
 
 ```/dev/null/examples.txt#L1-2
 git trano --branch main --path /www/folder --keep 5
 git trano -b main -p /www/folder
 ```
 
-Qué hace:
+What it does:
 
 1. `git fetch --all --prune`
-2. Actualiza checkout local a la rama indicada
-3. Copia el directorio de trabajo actual a:
-   - `/www/folder/releases/<fecha-hora>`
-4. Reemplaza symlink:
-   - `/www/folder/current -> /www/folder/releases/<fecha-hora>`
-5. Elimina releases antiguas y conserva las últimas `N`
+2. Updates local checkout to the requested branch
+3. Copies current working directory to:
+   - `/www/folder/releases/<timestamp>`
+4. Replaces symlink:
+   - `/www/folder/current -> /www/folder/releases/<timestamp>`
+5. Removes old releases and keeps the latest `N`
 
-### Desplegar tag
+### Deploy a tag
 
 ```/dev/null/examples.txt#L3-4
 git trano --tag v1.2.3 --path /www/folder
 git trano -t v1.2.3 -p /www/folder
 ```
 
-Mismo flujo que rama, pero usando checkout de tag.
+Same flow as branch deploy, but with tag checkout.
 
-### Revert a release anterior
+### Revert to previous release
 
 ```/dev/null/examples.txt#L6-6
 git trano --revert --path /www/folder
 ```
 
-- Toma las releases ordenadas por fecha
-- Apunta `current` a la penúltima release disponible
+- Reads releases sorted by timestamp
+- Points `current` to the previous available release
 
 ### Shared links
 
@@ -159,41 +159,41 @@ git trano --revert --path /www/folder
 git trano --branch main --path /www/folder --shared node_modules --shared vendor/subfolder
 ```
 
-Después de actualizar `current`:
+After updating `current`:
 
-- asegura `/www/folder/shared/node_modules`
-- asegura `/www/folder/shared/vendor/subfolder`
-- si existen en `current`, los elimina
-- crea symlink:
+- ensures `/www/folder/shared/node_modules`
+- ensures `/www/folder/shared/vendor/subfolder`
+- removes existing paths in `current` if present
+- creates symlinks:
   - `/www/folder/current/node_modules -> /www/folder/shared/node_modules`
   - `/www/folder/current/vendor/subfolder -> /www/folder/shared/vendor/subfolder`
 
 ---
 
-## Flujo interno (resumen)
+## Internal flow (summary)
 
-1. Validación de argumentos (rama/tag/revert mutuamente excluyentes)
-2. Preparación de directorios base (`releases`, `shared`)
-3. Modo deploy:
-   - fetch remoto
-   - checkout rama/tag
-   - crear release timestamp
-   - copiar archivos del repo a release (excluyendo `.git`)
-   - actualizar symlink `current`
-   - aplicar `shared`
-   - limpieza de releases antiguas
-4. Modo revert:
-   - listar releases
-   - mover `current` a release anterior
+1. Argument validation (branch/tag/revert are mutually exclusive)
+2. Base layout preparation (`releases`, `shared`)
+3. Deploy mode:
+   - fetch remotes
+   - checkout branch/tag
+   - create timestamped release
+   - copy repository files to release (excluding `.git`)
+   - update `current` symlink
+   - apply `shared` links
+   - cleanup old releases
+4. Revert mode:
+   - list releases
+   - move `current` to previous release
 
 ---
 
-## Compilación estática
+## Static build
 
-> Nota: en Linux glibc, los binarios suelen ser dinámicos por defecto.  
-> Para binario estático real, usa **musl**.
+> Note: on Linux glibc, binaries are usually dynamically linked by default.  
+> For a true static binary, use **musl**.
 
-### Linux x86_64 estático (musl)
+### Linux x86_64 static (musl)
 
 ```/dev/null/static-build.sh#L1-3
 rustup target add x86_64-unknown-linux-musl
@@ -201,30 +201,30 @@ cargo build --release --target x86_64-unknown-linux-musl
 strip target/x86_64-unknown-linux-musl/release/git-trano
 ```
 
-Binario resultante:
+Resulting binary:
 
 ```/dev/null/static-build.sh#L5-5
 target/x86_64-unknown-linux-musl/release/git-trano
 ```
 
-Verificar que sea estático:
+Verify it is static:
 
 ```/dev/null/static-check.sh#L1-1
 ldd target/x86_64-unknown-linux-musl/release/git-trano
 ```
 
-Debería indicar que no es ejecutable dinámico (o equivalente).
+It should report that it is not a dynamic executable (or equivalent).
 
-### Cross-compilation (opcional con `cross`)
+### Cross-compilation (optional with `cross`)
 
 ```/dev/null/cross.sh#L1-2
 cargo install cross
 cross build --release --target x86_64-unknown-linux-musl
 ```
 
-## Makefile incluido
+## Included Makefile
 
-El proyecto incorpora un `Makefile` con objetivos principales:
+The project includes a `Makefile` with the main targets:
 
 ```/dev/null/make-targets.txt#L1-13
 make help
@@ -242,41 +242,41 @@ make install
 make uninstall
 ```
 
-Notas:
-- `make static` compila `x86_64-unknown-linux-musl`.
-- `make static-all` compila `x86_64` y `aarch64` en musl.
-- `make install` instala por defecto en `/usr/local/bin/git-trano`.
-- Puedes personalizar instalación con `PREFIX`, `BINDIR` y `DESTDIR`.
+Notes:
+- `make static` builds `x86_64-unknown-linux-musl`.
+- `make static-all` builds both `x86_64` and `aarch64` musl binaries.
+- `make install` installs by default to `/usr/local/bin/git-trano`.
+- You can customize install paths with `PREFIX`, `BINDIR`, and `DESTDIR`.
 
-Ejemplo:
+Example:
 
 ```/dev/null/make-install-example.sh#L1-1
 make install PREFIX=/usr DESTDIR=/tmp/pkgroot
 ```
 
-## Pipeline de GitHub Actions para binarios estáticos
+## GitHub Actions pipeline for static binaries
 
-Se incluye el workflow:
+Included workflow:
 
 - `.github/workflows/release-static.yml`
 
-Qué hace:
-1. Se ejecuta en tags `v*` (y también manual con `workflow_dispatch`).
-2. Compila binarios estáticos `musl` para:
+What it does:
+1. Runs on tags `v*` (and manually via `workflow_dispatch`).
+2. Builds static `musl` binaries for:
    - `x86_64-unknown-linux-musl`
    - `aarch64-unknown-linux-musl`
-3. Empaqueta cada binario en `.tar.gz`.
-4. Genera checksum `.sha256` por artefacto.
-5. Publica artefactos del workflow.
-6. Si el disparador es un tag, sube assets automáticamente al GitHub Release.
-7. Genera también un `SHA256SUMS` combinado y lo adjunta al release.
+3. Packages each binary in `.tar.gz`.
+4. Generates `.sha256` checksum per artifact.
+5. Uploads workflow artifacts.
+6. If triggered by a tag, uploads assets to the GitHub Release.
+7. Also generates a combined `SHA256SUMS` file and attaches it to the release.
 
-### Cómo publicar una release estática
+### How to publish a static release
 
 ```/dev/null/release-flow.sh#L1-7
 git tag v0.1.0
 git push origin v0.1.0
-# GitHub Actions compilará y adjuntará:
+# GitHub Actions will build and attach:
 # - git-trano-v0.1.0-linux-amd64-musl.tar.gz
 # - git-trano-v0.1.0-linux-amd64-musl.tar.gz.sha256
 # - git-trano-v0.1.0-linux-arm64-musl.tar.gz
@@ -285,58 +285,59 @@ git push origin v0.1.0
 
 ---
 
-## Consideraciones y buenas prácticas
+## Best practices
 
-- Ejecuta `git trano` desde el repo correcto (working tree limpio recomendado)
-- Para producción, usa un usuario con permisos limitados sobre `--path`
-- Verifica espacio en disco si aumentas `--keep`
-- Usa `--shared` para datos persistentes entre releases (`uploads`, `storage`, `node_modules`, etc.)
-- Si despliegas tags, idealmente usa tags inmutables firmadas
+- Run `git trano` from the correct repository (clean working tree recommended)
+- For production, use a restricted user with limited permissions over `--path`
+- Verify disk space if you increase `--keep`
+- Use `--shared` for persistent data across releases (`uploads`, `storage`, `node_modules`, etc.)
+- If deploying tags, prefer immutable signed tags
 
 ---
 
-## Solución de problemas
+## Troubleshooting
 
-### `git trano` no se encuentra
+### `git trano` command not found
 
-Verifica que `git-trano` esté en el `PATH`:
+Make sure the binary is installed as `git-trano` and is in your `PATH`:
 
-```/dev/null/troubleshoot.sh#L1-2
+```/dev/null/troubleshoot-notfound.sh#L1-2
 which git-trano
 git trano --help
 ```
 
-### Error de permisos en destino
+### `Not inside a git working tree`
 
-Ajusta propietario/permisos sobre `<path>`:
+Run the command from inside a valid Git repository:
 
-```/dev/null/troubleshoot.sh#L4-6
-sudo mkdir -p /www/folder
-sudo chown -R <usuario>:<grupo> /www/folder
-chmod -R u+rwX /www/folder
+```/dev/null/troubleshoot-gitrepo.sh#L1-1
+git rev-parse --is-inside-work-tree
 ```
 
-### No existe rama/tag remota
+### `Failed to create directory ... File name too long (os error 36)`
 
-Confirma disponibilidad:
+This typically indicates recursive copying into nested release paths.
 
-```/dev/null/troubleshoot.sh#L8-9
-git fetch --all --prune
-git branch -a && git tag
+Use a deploy path outside the repository contents (recommended), for example:
+
+```/dev/null/troubleshoot-path.sh#L1-1
+git trano -b main -p /www/gitrano_releases --keep 4
+```
+
+Also ensure the tool excludes the deployment base directory from the source copy set.
+
+### Revert does not work
+
+`--revert` requires at least two releases in `<path>/releases`.
+
+Check:
+
+```/dev/null/troubleshoot-revert.sh#L1-1
+ls -1 /www/folder/releases
 ```
 
 ---
 
-## Roadmap sugerido
+## License
 
-- Hook pre/post deploy
-- Modo `--dry-run`
-- Filtro de exclusiones configurable (`--exclude`)
-- Locks para despliegues concurrentes
-- Integración con notificaciones (Slack/Discord/Webhook)
-
----
-
-## Licencia
-
-MIT. Ver archivo `LICENSE`.
+See `LICENSE`.
